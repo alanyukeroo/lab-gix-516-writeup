@@ -1,15 +1,80 @@
+import rclpy
+from rclpy.node import Node
+from rclpy.action import ActionClient
+from nav2_msgs.action import NavigateToPose
+from geometry_msgs.msg import PoseStamped
+from nav_msgs.msg import Odometry
+
 import customtkinter as ctk
 from tkinter import messagebox
-import subprocess
 import threading
-import re
+import time
 import tkinter as tk
 
-import time
-
-# Set the appearance and theme
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
+
+class RobotActionClient(Node):
+    def __init__(self, ui_app):
+        super().__init__('gui_action_client')
+        self.ui = ui_app
+        
+        # Action client for moving the robot
+        self.action_client = ActionClient(self, NavigateToPose, '/navigate_to_pose')
+        
+        # Subscribe to odometry to get live position for the map
+        self.odom_sub = self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
+        
+        self.goal_handle = None
+
+    def odom_callback(self, msg):
+        # Grab live X and Y coordinates
+        x = msg.pose.pose.position.x
+        y = msg.pose.pose.position.y
+        # Use .after() to safely update Tkinter from the ROS thread
+        self.ui.after(0, self.ui.update_robot_marker, x, y)
+
+    def send_waypoint(self, x, y):
+        self.action_client.wait_for_server()
+        
+        goal_msg = NavigateToPose.Goal()
+        goal_msg.pose.header.frame_id = 'map'
+        goal_msg.pose.header.stamp = self.get_clock().now().to_msg()
+        goal_msg.pose.pose.position.x = float(x)
+        goal_msg.pose.pose.position.y = float(y)
+        goal_msg.pose.pose.orientation.w = 1.0
+
+        # Send the target and hook up the feedback
+        send_goal_future = self.action_client.send_goal_async(
+            goal_msg, 
+            feedback_callback=self.feedback_callback
+        )
+        send_goal_future.add_done_callback(self.goal_response_callback)
+
+    def feedback_callback(self, feedback_msg):
+        dist = feedback_msg.feedback.distance_remaining
+        self.ui.after(0, self.ui.update_distance, dist)
+
+    def goal_response_callback(self, future):
+        self.goal_handle = future.result()
+        if not self.goal_handle.accepted:
+            self.ui.after(0, self.ui.show_status, "Target Rejected", "#e74c3c")
+            return
+        
+        get_result_future = self.goal_handle.get_result_async()
+        get_result_future.add_done_callback(self.get_result_callback)
+
+    def get_result_callback(self, future):
+        status = future.result().status
+        if status == 4:  # 4 means SUCCEEDED
+            self.ui.after(0, self.ui.show_status, "Delivery Reached", "#2ecc71")
+        else:
+            self.ui.after(0, self.ui.show_status, "Movement Stopped", "#e74c3c")
+
+    def cancel_movement(self):
+        if self.goal_handle:
+            self.goal_handle.cancel_goal_async()
+
 
 class RobotDashboard(ctk.CTk):
     def __init__(self):
@@ -18,32 +83,35 @@ class RobotDashboard(ctk.CTk):
         self.title("Robot Operator Hub")
         self.geometry("900x600")
 
-        self.current_process = None
-        self.monitoring = False
+        # Initialize ROS 2
+        rclpy.init(args=None)
+        self.ros_node = RobotActionClient(self)
+        
+        # Run ROS 2 spin in a background thread so the GUI does not freeze
+        self.ros_thread = threading.Thread(target=rclpy.spin, args=(self.ros_node,), daemon=True)
+        self.ros_thread.start()
 
-        # Configure grid for layout
+        self.start_time = 0
+        self.timer_running = False
+
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
-        # Sidebar Frame
+        # Sidebar
         self.sidebar = ctk.CTkFrame(self, width=200, corner_radius=0)
         self.sidebar.grid(row=0, column=0, sticky="nsew")  
 
-
-        self.logo_label = ctk.CTkLabel(self.sidebar, text="NAV2 CONTROL", font=ctk.CTkFont(size=20, weight="bold"))
+        self.logo_label = ctk.CTkLabel(self.sidebar, text="ROBOT CONTROL", font=ctk.CTkFont(size=20, weight="bold"))
         self.logo_label.grid(row=0, column=0, padx=20, pady=(20, 10))
 
-        # Sidebar Buttons
-        # Dispatch Buttons moved to Sidebar for better layout
-        self.create_nav_button("Home / Kitchen", 0.0, 0.0, "gray")
-        self.create_nav_button("Dispatch to Table 1", 1.0, 1.0, "blue")
-        self.create_nav_button("Dispatch to Table 2", 2.5, -1.0, "blue")
-        self.create_nav_button("Dispatch to Table 3", -1.5, 2.0, "blue")
+        self.create_waypoint_button("Home / Kitchen", 0.0, 0.0)
+        self.create_waypoint_button("Dispatch to Table 1", 1.0, 1.0)
+        self.create_waypoint_button("Dispatch to Table 2", 2.5, -1.0)
+        self.create_waypoint_button("Dispatch to Table 3", -1.5, 2.0)
 
-        # Emergency Cancel
         self.cancel_btn = ctk.CTkButton(self.sidebar, text="CANCEL ALL GOALS", 
                                         fg_color="#e74c3c", hover_color="#c0392b",
-                                        command=self.cancel_navigation)
+                                        command=self.cancel_movement)
         self.cancel_btn.grid(row=10, column=0, pady=30, padx=20, sticky="ew")
 
         # Main Control Frame
@@ -51,11 +119,9 @@ class RobotDashboard(ctk.CTk):
         self.main_frame.grid(row=0, column=1, padx=20, pady=20, sticky="nsew")
         self.main_frame.grid_columnconfigure(0, weight=1)
 
-        # Status Section
         self.status_label = ctk.CTkLabel(self.main_frame, text="System Ready", text_color="#2ecc71", font=("Arial", 24, "bold"))
         self.status_label.pack(pady=10)
 
-        # Info Frame (Time, Distance)
         self.info_frame = ctk.CTkFrame(self.main_frame, fg_color="transparent")
         self.info_frame.pack(pady=10, fill="x", padx=20)
         
@@ -65,17 +131,17 @@ class RobotDashboard(ctk.CTk):
         self.time_label = ctk.CTkLabel(self.info_frame, text="Time: --", font=("Arial", 16))
         self.time_label.pack(side="right", fill="x", expand=True)
 
-        # Map Canvas
         self.map_frame = ctk.CTkFrame(self.main_frame)
         self.map_frame.pack(pady=20, expand=True, fill="both")
         
-        # Using standard tk.Canvas for drawing primitives
         self.canvas = tk.Canvas(self.map_frame, bg="#2b2b2b", highlightthickness=0)
         self.canvas.pack(fill="both", expand=True, padx=5, pady=5)
         self.canvas.bind("<Configure>", self.draw_map_grid)
         
         self.robot_dot = None
         self.goal_dot = None
+        self.robot_pos = (0.0, 0.0)
+        self.pixels_per_meter = 40
 
     def draw_map_grid(self, event=None):
         self.canvas.delete("all")
@@ -83,24 +149,15 @@ class RobotDashboard(ctk.CTk):
         h = self.canvas.winfo_height()
         cx, cy = w/2, h/2
         
-        # Draw grid lines (assuming 1 meter = 40 pixels)
-        self.pixels_per_meter = 40
-        
-        # Grid
         for i in range(-10, 11):
             offset = i * self.pixels_per_meter
-            # Vertical
             self.canvas.create_line(cx + offset, 0, cx + offset, h, fill="#404040")
-            # Horizontal (Y is inverted in screen coords, but loop handles both)
             self.canvas.create_line(0, cy + offset, w, cy + offset, fill="#404040")
             
-        # Origin
         self.canvas.create_oval(cx-3, cy-3, cx+3, cy+3, fill="white")
         self.canvas.create_text(cx+10, cy+10, text="(0,0)", fill="gray")
 
-        # Redraw robot if position known
-        if hasattr(self, 'robot_pos'):
-            self.update_robot_marker(self.robot_pos[0], self.robot_pos[1])
+        self.update_robot_marker(self.robot_pos[0], self.robot_pos[1])
 
     def update_robot_marker(self, x, y):
         self.robot_pos = (x, y)
@@ -109,146 +166,65 @@ class RobotDashboard(ctk.CTk):
         cx, cy = w/2, h/2
         
         screen_x = cx + (x * self.pixels_per_meter)
-        screen_y = cy - (y * self.pixels_per_meter) # Map Y is up, Screen Y is down
+        screen_y = cy - (y * self.pixels_per_meter)
         
         if self.robot_dot:
             self.canvas.delete(self.robot_dot)
         
-        # Draw robot
         self.robot_dot = self.canvas.create_oval(screen_x-8, screen_y-8, screen_x+8, screen_y+8, fill="#3498db", outline="white")
 
-    def create_nav_button(self, name, x, y, theme):
-        # Add to sidebar instead
-        btn = ctk.CTkButton(self.sidebar, text=name, 
-                             command=lambda: self.send_robot(x, y, name))
+    def create_waypoint_button(self, name, x, y):
+        btn = ctk.CTkButton(self.sidebar, text=name, command=lambda: self.send_robot(x, y, name))
         btn.grid(sticky="ew", padx=20, pady=10)
 
     def send_robot(self, x, y, location_name):
-        if self.current_process:
-            self.cancel_navigation()
-
-        # Update goal on map
+        # Stop current action before sending a new one
+        self.ros_node.cancel_movement()
+        
         w = self.canvas.winfo_width()
         h = self.canvas.winfo_height()
         cx, cy = w/2, h/2
-        gx = cx + (x * 40)
-        gy = cy - (y * 40)
+        gx = cx + (x * self.pixels_per_meter)
+        gy = cy - (y * self.pixels_per_meter)
         
         if self.goal_dot:
             self.canvas.delete(self.goal_dot)
         self.goal_dot = self.canvas.create_oval(gx-5, gy-5, gx+5, gy+5, fill="#f1c40f", outline="black")
-        
-        # [cite_start]ROS 2 CLI command from your report [cite: 34]
-        # Keep feedback enabled to parse output
-        command = [
-            'ros2', 'action', 'send_goal', '/navigate_to_pose', 
-            'nav2_msgs/action/NavigateToPose',
-            f'{{ "pose": {{ "header": {{ "frame_id": "map" }}, "pose": {{ "position": {{ "x": {x}, "y": {y}, "z": 0.0 }}, "orientation": {{ "w": 1.0 }} }} }} }}',
-            '--feedback'
-        ]
 
-        try:
-            self.current_process = subprocess.Popen(
-                command, 
-                stdout=subprocess.PIPE, 
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1
-            )
-            self.monitoring = True
-            
-            thread = threading.Thread(target=self.monitor_process, args=(self.current_process, location_name))
-            thread.daemon = True
-            
-            self.start_time = time.time()
-            thread.start()
-            
-            self.status_label.configure(text=f"Moving to: {location_name}", text_color="#f1c40f")
-        except Exception as e:
-            messagebox.showerror("System Error", f"Command failed: {e}")
+        self.show_status(f"Moving to: {location_name}", "#f1c40f")
+        self.start_time = time.time()
+        self.timer_running = True
+        self.update_timer()
 
-    def monitor_process(self, process, location_name):
-        # Output parsers
-        dist_pattern = re.compile(r'distance_remaining:\s*([\d\.]+)')
-        time_pattern = re.compile(r'navigation_time:.*?sec:\s*(\d+)', re.DOTALL) # Simplified
-        
-        # We need to capture block output for position, which is hard line-by-line. 
-        # But usually 'feedback' prints 'current_pose' logic.
-        # Let's try to simple grep for x/y if they appear in lines.
-        # Typical CLI output:
-        # feedback:
-        #   current_pose: ...
-        #     position:
-        #       x: 0.0
-        #       y: 0.0
-        
-        # We will parse line by line and keep state
-        
-        current_x = 0.0
-        current_y = 0.0
-        
-        while self.monitoring:
-            # Update time
+        # Send the goal via ROS 2
+        self.ros_node.send_waypoint(x, y)
+
+    def update_distance(self, dist):
+        self.dist_label.configure(text=f"Dist: {dist:.2f} m")
+
+    def show_status(self, text, color):
+        self.status_label.configure(text=text, text_color=color)
+        if "Reached" in text or "Stopped" in text or "Rejected" in text:
+            self.timer_running = False
+
+    def update_timer(self):
+        if self.timer_running:
             elapsed = time.time() - self.start_time
-            self.after(0, lambda t=elapsed: self.time_label.configure(text=f"Time: {t:.1f} s"))
+            self.time_label.configure(text=f"Time: {elapsed:.1f} s")
+            self.after(100, self.update_timer)
 
-            line = process.stdout.readline()
-            if not line:
-                break
-                
-            # Check for Distance
-            dist_match = dist_pattern.search(line)
-            if dist_match:
-                dist = float(dist_match.group(1))
-                self.after(0, lambda d=dist: self.dist_label.configure(text=f"Dist: {d:.2f} m"))
-
-            # Check for Time
-            time_match = time_pattern.search(line) # Note: this regex is simple and might match wrong 'sec', but usually nav_time is distinct
-            # Actually ROS feedback yaml is tricky. Let's just use start_time logic if regex fails
-            # Or use a simpler approach: elapsed time since start
-            
-            pass # Skipping complex time parsing from regex for now to avoid errors, using a timer might be better.
-            
-            # Naive Position Parsing (matches "x: 1.2" lines)
-            # This is risky if header has x/y, but header is usually deeper or standard
-            if "x:" in line:
-                try: 
-                    val = float(line.split(":")[-1].strip())
-                    # Heuristic: if indentation is deep, it's likely position
-                    current_x = val
-                except: pass
-            if "y:" in line:
-                try: 
-                    val = float(line.split(":")[-1].strip())
-                    current_y = val
-                    # Assuming Y comes after X, we update map here
-                    self.after(0, lambda x=current_x, y=current_y: self.update_robot_marker(x, y))
-                except: pass
-
-            # Check for success
-            if "Goal reached" in line or "SUCCEEDED" in line:
-                self.after(0, lambda: self.status_label.configure(text=f"Reached: {location_name}", text_color="#2ecc71"))
-                self.monitoring = False
-
-        # If process ends
-        if process.poll() is not None and process.poll() != 0:
-            # Maybe canceled or failed, check stderr?
-            pass
-
-    def cancel_navigation(self):
-        # Cancel command for Nav2
-        cancel_cmd = ['ros2', 'action', 'cancel_goal', '/navigate_to_pose', '-a']
-        subprocess.Popen(cancel_cmd)
-        
-        self.monitoring = False
-        if self.current_process:
-            self.current_process.terminate()
-            self.current_process = None
-            
-        self.status_label.configure(text="Navigation Cancelled", text_color="#e74c3c")
+    def cancel_movement(self):
+        self.ros_node.cancel_movement()
+        self.timer_running = False
+        self.show_status("Movement Cancelled", "#e74c3c")
         self.dist_label.configure(text="Dist: --")
-        self.time_label.configure(text="Time: Stopped")
+
+    def on_closing(self):
+        self.ros_node.destroy_node()
+        rclpy.shutdown()
+        self.destroy()
 
 if __name__ == "__main__":
     app = RobotDashboard()
+    app.protocol("WM_DELETE_WINDOW", app.on_closing)
     app.mainloop()
