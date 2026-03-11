@@ -28,7 +28,7 @@ class BrainNode(Node):
         self.action_in_progress = False
 
         # Variabel untuk Adaptive Wall Follower
-        self.target_distance = 0.55
+        self.target_distance = 1
         self.safe_front_distance = 1
         self.prev_error = 0.0
         self.integral = 0.0
