@@ -1,0 +1,46 @@
+🍓 Raspberry Pi
+Terminal 1 — Hardware:
+bashros2 launch turtlebot3_bringup robot.launch.py
+Terminal 2 — USB Camera:
+bashros2 run usb_cam usb_cam_node_exe --ros-args \
+  -p video_device:=/dev/video0 \
+  -p image_width:=320 \
+  -p image_height:=240 \
+  -p framerate:=10.0 \
+  -p pixel_format:=mjpeg2rgb \
+  -r image_raw:=/image_raw
+
+💻 Laptop
+Terminal 1 — YOLO:
+bashsource ~/turtlebot4_ws/install/setup.bash
+ros2 launch yolo_bringup yolov8.launch.py \
+  model:=~/turtlebot4_ws/yolov8n.pt \
+  input_image_topic:=/image_raw \
+  image_reliability:=best_effort
+Terminal 2 — Person Obstacle Node:
+bashsource ~/turtlebot4_ws/install/setup.bash
+python3 ~/turtlebot4_ws/person_obstacle_node.py
+Terminal 3 — Nav2:
+bashsource ~/turtlebot4_ws/install/setup.bash
+ros2 launch turtlebot4_navigation nav2.launch.py
+Terminal 4 — Dashboard:
+bashsource ~/turtlebot4_ws/install/setup.bash
+python3 ~/turtlebot4_ws/dashboard_robot.py
+
+⚠️ Sebelum Run — Checklist
+bash# Semua terminal Pi & Laptop harus sama
+echo $ROS_DOMAIN_ID   # harus 38
+echo $TURTLEBOT3_MODEL  # harus burger (Pi)
+```
+
+---
+
+## Urutan Run yang Bener
+```
+Pi: robot.launch.py         ← pertama
+Pi: usb_cam                 ← kedua
+    ↓
+Laptop: YOLO                ← setelah kamera jalan
+Laptop: person_obstacle     ← setelah YOLO jalan
+Laptop: Nav2                ← setelah map ada
+Laptop: dashboard           ← terakhir

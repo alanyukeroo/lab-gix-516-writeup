@@ -86,3 +86,17 @@ cp marker_small.png ~/turtlebot4_ws/src/turtlebot4_simulator/turtlebot4_ignition
 cd ~/turtlebot4_ws
 colcon build --packages-select turtlebot4_ignition_bringup
 source install/setup.bash
+
+#CHECK ALL STATUS
+
+ros2 topic echo /stop_status
+
+ros2 topic echo /hazard_detection
+
+# IN RASP turtlerobot4 
+
+sudo systemctl restart turtlebot4.service && journalctl -u turtlebot4.service -f
+
+
+ros2 param set /local_costmap/local_costmap inflation_layer.inflation_radius 0.2
+ros2 param set /global_costmap/global_costmap inflation_layer.inflation_radius 0.2
